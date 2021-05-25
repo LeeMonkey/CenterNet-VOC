@@ -48,8 +48,14 @@ def main():
     model.to(device)
 
     # dataset
-    train_transform = CenterNetTransform(is_training=True)
-    test_transform = CenterNetTransform(is_training=False)
+    train_transform = CenterNetTransform(size=config.INPUT_SIZE, 
+                                         mean=config.MEAN, 
+                                         std=config.STD, 
+                                         is_training=True)
+    test_transform = CenterNetTransform(size=config.INPUT_SIZE,
+                                        mean=config.MEAN,
+                                        std=config.std,
+                                        is_training=False)
     target_transform = VOCAnnotationTransform() 
 
     train_dataset = CenterNetDataset('data', 
@@ -107,7 +113,7 @@ def main():
     best_test_loss = np.inf 
     num_iters_per_epoch = len(train_loader)
     num_epochs = config.NUM_EPOCHS
-    start_epoch = 0
+    start_epoch =112
     
     for epoch in range(start_epoch, num_epochs):
     

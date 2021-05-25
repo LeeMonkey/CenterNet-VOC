@@ -9,11 +9,13 @@ ROOT=osp.abspath(osp.join(osp.dirname(__file__), '../../'))
 sys.path.append(ROOT)
 
 # load pretrained model
-LOAD_PRETRAINED_MODEL=False
+LOAD_PRETRAINED_MODEL=True
 PRETRAINED_MODEL=None
 
 #input size
-INPUT_SIZE=(640, 640)
+INPUT_SIZE = (640, 640)
+MEAN = (107, 114, 123)
+STD = (1, 1, 1)
 
 date = time.strftime('%Y%m%d', time.localtime())
 # dir of model

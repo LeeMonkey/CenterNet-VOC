@@ -16,14 +16,13 @@ def _neg_loss(pred, gt, alpha=2, beta=4, weights=None):
         gt_regr (batch x c x h x w)
     '''
     pos_inds = gt.eq(1).float()
+    weights = (pos_inds.sum() / torch.clamp(torch.sum(pos_inds, dim=(0, 2, 3)), min=1)).view(1, pos_inds.shape[1], 1, 1)
     neg_inds = gt.lt(1).float()
     part1 = torch.pow(pos_inds + (2 * neg_inds - 1) * pred, alpha)
     part2 = torch.pow(neg_inds + (2 * pos_inds - 1) * gt, beta)
     part3 = torch.log(neg_inds + (2 * pos_inds - 1) * pred)
     loss_tensor = -1.0 * part1 * part2 * part3
-    if weights is not None:
-        for i, w in enumerate(weights):
-            loss_tensor[:, i] *= w
+    loss_tensor *= weights
     loss = torch.sum(loss_tensor)
 
     num_pos = pos_inds.float().sum()
