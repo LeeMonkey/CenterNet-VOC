@@ -9,4 +9,6 @@ data/crop_image/
 img_ret/
 log/
 models/
-
+src/config/__pycache__/
+src/dataset/__pycache__/
+src/modeling/__pycache__/

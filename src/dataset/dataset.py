@@ -95,7 +95,7 @@ class CenterNetDataset(data.Dataset):
         self.target_transform =  target_transform
         self.image_path_fmt = osp.join('{}', 'JPEGImages', '{}.jpg') 
         self.xml_path_fmt = osp.join('{}', 'Annotations', '{}.xml')
-        self.heatmap_transform = ConvertHeatmap(num_classes=NUM_CLASSES)
+        self.heatmap_transform = ConvertHeatmap(num_classes=NUM_CLASSES, downsampling_rate=DOWNSAMPLE_RATIO)
 
         assert len(image_sets), 'image_sets is empty!'
 
@@ -136,11 +136,10 @@ class CenterNetDataset(data.Dataset):
     def pull_item(self, index):
         image_path, xml_path = self.ids[index]
         image = cv2.imread(image_path)
+        target = None
         if self.target_transform is not None:
             if xml_path is not None:
                 target = self.target_transform(xml_path)
-            else:
-                target = None
 
         if self.transform is not None:
             target = np.array(target) if target else target

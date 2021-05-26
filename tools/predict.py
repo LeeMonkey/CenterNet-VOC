@@ -6,104 +6,61 @@ Created on Mon Jan  6 22:20:07 2020
 """
 import os
 import sys
-import cv2
-import math
-import time
+
 import torch
-import numpy as np
 import torch.nn as nn
-from pycocotools.coco import COCO
-from dataset import ctDataset
-try:
-    import xml.etree.cElementTree as ET
-except:
-    import xml.etree.ElementTree as ET
 
+import os.path as osp
+import cv2
+import numpy as np
+import time
 
-sys.path.append("backbone")
-#from resnet_dcn import ResNet
-#from dlanet_dcn import DlaNet
-from mobilenetv2 import MobileNet
+sys.path.append(osp.abspath(osp.join(osp.dirname(__file__), '../')))
+import src.config as config
+from src.backbone.mobilenetv2 import MobileNet
+from src.dataset import CenterNetDataset
+from src.utils import CenterNetTransform, VOCAnnotationTransform
+from src.modeling.loss import _gather_feat, _transpose_and_gather_feat
 
-from Loss import _gather_feat
-from dataset import get_affine_transform
-from Loss import _transpose_and_gather_feat
-
-def draw(img, res, is_coco=False):
-    #labels = {1:'Type_63_Tracked_Armoured_Vehicle', 
-    #        2:'Type_59_Medium_Tank',
-    #        3:'ZBD-86_Infantry_Fighting_Vehicle'}
-    labels = {1:'59', 
-            2:'63',
-            3:'86',
-            4:'08'}
+def draw(img, res, is_gt=False):
     draw_image = img.copy()
-    for ann in res:
-        if is_coco:
-            lx = int(ann["bbox"][0] - ann["bbox"][2] / 2)
-            ly = int(ann["bbox"][1] - ann["bbox"][3] / 2)
-            rx = int(ann["bbox"][0] + ann["bbox"][2] / 2)
-            ry = int(ann["bbox"][1] + ann["bbox"][3] / 2)
-            label = ann['category_id']
-        else:
-            lx, ly, rx, ry = [int(x) for x in ann[:-2]]
-            score = ann[-2]
-            label = int(ann[-1])
+    if is_gt:
+        if res is None:
+            return
+
+    for box in res:
+        xmin, ymin, xmax, ymax = box[:4]
+        label_str = config.CENTERNET_CLASSES[int(box[-1])]
 
         if 'colors' not in globals():
             globals()['colors'] = {}
-        if label not in globals()['colors']:
+        if label_str not in globals()['colors']:
             r = np.random.randint(50, 255)
             g = np.random.randint(150, 255)
             b = np.random.randint(100, 255)
-            globals()['colors'][label] = (b, g, r)
-        draw_image = cv2.rectangle(draw_image,
-                      (lx, ly),
-                      (rx, ry),
-                      globals()['colors'][label],
-                      2)
+            globals()['colors'][label_str] = (b, g, r)
 
-        if not is_coco:
+        color = globals()['colors'][label_str]
+        if is_gt:
+            color = tuple([255 - v for v in color])
+        draw_image = cv2.rectangle(draw_image,
+                                   (int(xmin), int(ymin)),
+                                   (int(xmax), int(ymax)),
+                                   color,
+                                   2)
+        if not is_gt:
+            score = box[4]
             draw_image = cv2.putText(draw_image,
-                        "{:s}: {:.2f}".format(labels[label], score),
-                        (lx, ly - 2),
+                        "{:s}: {:.2f}".format(label_str, score),
+                        (int(xmin), int(ymin) - 2),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         0.6,
-                        globals()['colors'][label],
+                        color,
                         2)
     return draw_image
 
-def pre_process(image):
-    height, width = image.shape[0:2]
-    #inp_height, inp_width = 512, 512
-    #inp_height = inp_width = 608
-    inp_height, inp_width = ctDataset.default_resolution
-    c = np.array([width / 2., height / 2.], dtype=np.float32)
-    s = max(height, width) * 1.0
-    trans_input = get_affine_transform(c, s, 0, [inp_width, inp_height])
-    inp_image = cv2.warpAffine(image, trans_input, (inp_width, inp_height),flags=cv2.INTER_LINEAR)
 
-    """
-    mean = np.array([0.408, 0.447, 0.470], dtype=np.float32).reshape(1, 1, 3)
-    std  = np.array([0.289, 0.274, 0.278], dtype=np.float32).reshape(1, 1, 3)
-    
-    inp_image = ((inp_image / 255. - mean) / std).astype(np.float32)
-    """
-    mean = ctDataset.mean
-    std = ctDataset.std
-    
-    inp_image = (inp_image.astype(np.float32) / 255. - mean) / std
-
-    images = inp_image.transpose(2, 0, 1).reshape(1, 3, inp_height, inp_width) # 三维reshape到4维，（1，3，512，512） 
-    
-    images = torch.from_numpy(images)
-    meta = {'c': c, 's': s, 
-            'out_height': inp_height // 4, 
-            'out_width': inp_width // 4}
-    return images, meta
-
-
-def _nms(heat, kernel=5):
+def _nms(heat, kernel=3):
     pad = (kernel - 1) // 2
     hmax = nn.functional.max_pool2d(
         heat, (kernel, kernel), stride=1, padding=pad)
@@ -127,7 +84,7 @@ def _topk(scores, K=40):
     return topk_score, topk_inds, topk_clses, topk_ys, topk_xs
 
 
-def ctdet_decode(heat, wh, reg=None, K=40):
+def decode(heat, wh, reg=None, K=40):
     batch, cat, height, width = heat.size()
     # heat = torch.sigmoid(heat)
     # perform nms on heatmaps
@@ -157,76 +114,35 @@ def ctdet_decode(heat, wh, reg=None, K=40):
 
 
 def process(images, return_time=False):
+    torch.cuda.synchronize()
     start_time = time.time()
     with torch.no_grad():
       output = model(images)
-      hm = output['hm'].sigmoid_()
-      #ang = output['ang'].relu_()
+      hm = output['heatmap'].sigmoid_()
       wh = output['wh']
-      reg = output['reg'] 
+      reg = output['offset'] 
+      dets = decode(hm, wh, reg=reg, K=100) # K 是最多保留几个目标
       torch.cuda.synchronize()
       forward_time = time.time() - start_time
-      dets = ctdet_decode(hm, wh, reg=reg, K=100) # K 是最多保留几个目标
     if return_time:
-      return output, dets, forward_time
+      return dets, forward_time
     else:
-      return output, dets
+      return dets
 
 
-def affine_transform(pt, t):
-    new_pt = np.array([pt[0], pt[1], 1.], dtype=np.float32).T
-    new_pt = np.dot(t, new_pt)
-    return new_pt[:2]
+def get_rescale_ratio(src_size, dst_size):
+    assert len(src_size) == len(dst_size) \
+        and len(src_size) == 2
+    sw, sh = src_size
+    dw, dh = dst_size
+    return max(dh / sh, dw / sw)
 
 
-def transform_preds(coords, center, scale, output_size):
-    target_coords = np.zeros(coords.shape)
-    trans = get_affine_transform(center, scale, 0, output_size, inv=1)
-    for p in range(coords.shape[0]):
-        target_coords[p, 0:2] = affine_transform(coords[p, 0:2], trans)
-    return target_coords
-
-
-def ctdet_post_process(dets, c, s, h, w, num_classes):
-  # dets: batch x max_dets x dim
-  # return 1-based class det dict
-  ret = []
-  for i in range(dets.shape[0]):
-    top_preds = {}
-    dets[i, :, :2] = transform_preds(dets[i, :, 0:2], c[i], s[i], (w, h))
-    dets[i, :, 2:4] = transform_preds(dets[i, :, 2:4], c[i], s[i], (w, h))
-    classes = dets[i, :, -1]
-    for j in range(num_classes):
-      inds = (classes == j)
-      top_preds[j + 1] = np.concatenate([
-        dets[i, inds, :4].astype(np.float32),
-        dets[i, inds, 4:5].astype(np.float32)], axis=1).tolist()
-    ret.append(top_preds)
-  return ret
-
-
-def post_process(dets, meta):
-    dets = dets.detach().cpu().numpy()
-    dets = dets.reshape(1, -1, dets.shape[2])  
-    num_classes = ctDataset.num_classes
-    dets = ctdet_post_process(dets.copy(), [meta['c']], [meta['s']],meta['out_height'], meta['out_width'], num_classes)
-    for j in range(1, num_classes + 1):
-      dets[0][j] = np.array(dets[0][j], dtype=np.float32).reshape(-1, 5)
-      dets[0][j][:, :4] /= 1
-    return dets[0]
-
-
-def merge_outputs(detections):
-    num_classes = ctDataset.num_classes
-    max_obj_per_img = 100
-    scores = np.hstack([detections[j][:, 4] for j in range(1, num_classes + 1)])
-    if len(scores) > max_obj_per_img:
-      kth = len(scores) - max_obj_per_img
-      thresh = np.partition(scores, kth)[kth]
-      for j in range(1, num_classes + 1):
-        keep_inds = (detections[j][:, 4] >= thresh)
-        detections[j] = detections[j][keep_inds]
-    return detections
+def postprocess(dets, src_size, dst_size):
+    ratio = get_rescale_ratio(src_size, dst_size) * config.DOWNSAMPLE_RATIO
+    dets = dets.detach().cpu().numpy().reshape(-1, dets.shape[-1])
+    dets[..., :4] *= ratio
+    return dets
 
 
 def indent(elem, level=0):
@@ -286,133 +202,105 @@ def process_frame(file_name, frame, labels, save_dir="JPEGImages"):
     xml_path = os.path.join("labels", os.path.splitext(file_name)[0] + ".xml")
     tree.write(xml_path, encoding="utf-8")
 
-def py_cpu_nms(all_dets, thresh=0.45, global_nms=True):
-    """Pure Python NMS baseline."""
-    nms_dets = []
-    if len(all_dets) == 0:
-        return nms_dets
-    if global_nms:
-        dets = all_dets
-        x1 = dets[:, 0]
-        y1 = dets[:, 1]
-        x2 = dets[:, 2]
-        y2 = dets[:, 3]
+
+def apply_nms(dets, hm_thresh=0.3, nms_thresh=0.3, global_nms=True):
+    dets = dets[dets[:, 4] >= hm_thresh]
+    if len(dets):
+        xmin = dets[:, 0]
+        ymin = dets[:, 1]
+        xmax = dets[:, 2]
+        ymax = dets[:, 3]
         scores = dets[:, 4]
+        areas = (xmax -  xmin + 1) * (ymax - ymin + 1)
+        desc = np.argsort(-scores)
 
-        areas = (x2 - x1 + 1) * (y2 - y1 + 1)
-        order = scores.argsort()[::-1]
+        keep = np.array([True] * desc.size)
+        for i, idx in enumerate(desc):
+            if not keep[idx]:
+                continue
 
-        keep = []
-        while order.size > 0:
-            i = order[0]
-            keep.append(i)
-            xx1 = np.maximum(x1[i], x1[order[1:]])
-            yy1 = np.maximum(y1[i], y1[order[1:]])
-            xx2 = np.minimum(x2[i], x2[order[1:]])
-            yy2 = np.minimum(y2[i], y2[order[1:]])
+            mask = keep.copy()
+            mask[:(i+1)] = False
+            if not global_nms:
+                mask &= (dets[:, -1] == dets[idx][-1])
 
-            w = np.maximum(0.0, xx2 - xx1 + 1)
-            h = np.maximum(0.0, yy2 - yy1 + 1)
-            inter = w * h 
-            ovr = inter / (areas[i] + areas[order[1:]] - inter)
-
-            inds = np.where(ovr <= thresh)[0]
-            order = order[inds + 1]
-        if keep:
-            nms_dets.append(dets[keep])
-    else:
-        for cls in range(1, ctDataset.num_classes+1):
-            dets = all_dets[all_dets[:, -1] == cls]
-            x1 = dets[:, 0]
-            y1 = dets[:, 1]
-            x2 = dets[:, 2]
-            y2 = dets[:, 3]
-            scores = dets[:, 4]
-
-            areas = (x2 - x1 + 1) * (y2 - y1 + 1)
-            order = scores.argsort()[::-1]
-
-            keep = []
-            while order.size > 0:
-                i = order[0]
-                keep.append(i)
-                xx1 = np.maximum(x1[i], x1[order[1:]])
-                yy1 = np.maximum(y1[i], y1[order[1:]])
-                xx2 = np.minimum(x2[i], x2[order[1:]])
-                yy2 = np.minimum(y2[i], y2[order[1:]])
-
-                w = np.maximum(0.0, xx2 - xx1 + 1)
-                h = np.maximum(0.0, yy2 - yy1 + 1)
-                inter = w * h 
-                ovr = inter / (areas[i] + areas[order[1:]] - inter)
-
-                inds = np.where(ovr <= thresh)[0]
-                order = order[inds + 1]
-            if keep:
-                nms_dets.append(dets[keep])
-    if nms_dets:
-        nms_dets = np.concatenate(nms_dets, axis=0)
-    return nms_dets
+            if not any(mask):
+                break
+                
+            left = np.maximum(xmin[idx], xmin[desc[mask]])
+            top = np.maximum(ymin[idx], ymin[desc[mask]])
+            right = np.minimum(xmax[idx], xmax[desc[mask]])
+            bottom = np.minimum(ymax[idx], ymax[desc[mask]])
+            w = np.maximum(0, right - left + 1)
+            h = np.maximum(0, bottom - top + 1)
+            intersect_areas = w * h
+            iou = intersect_areas / (areas[idx] + areas[desc[mask]] - intersect_areas)
+            keep[mask] = (iou <= nms_thresh)
+        dets = dets[keep]
+    return dets
     
+
 if __name__ == '__main__':
-    os.environ["CUDA_VISIBLE_DEVICES"] = '1'
+    os.environ["CUDA_VISIBLE_DEVICES"] = '2'
     infer_images_dir = 'data/Armour/JPEGImages'
-    model_path = "models/Armour/20210519/640x640/last.pth"
-    anno_file = "data/Armour/test.json"
+    model_path = osp.join('models/Armour/20210524/640x640', 'last.pth')
+    test_sets = [('Armour', 'test')]
     output_dir = "img_ret/Armour"
 
     hm_thresh = 0.3
     nms_thresh = 0.3
 
-    #model = ResNet(18)
-    model = MobileNet(pretrained=False, num_classes=ctDataset.num_classes)
+    # init transform
+    transform = CenterNetTransform(size=config.INPUT_SIZE,
+                                        mean=config.MEAN,
+                                        std=config.STD,
+                                        is_training=False)
+
+    target_transform = VOCAnnotationTransform(class_to_ind=None,
+                                              keep_difficult=False)
+
+    test_dataset = CenterNetDataset('data', 
+                               image_sets = test_sets, 
+                               image_no_boxes=True, 
+                               transform=None, 
+                               target_transform=target_transform)
+
+
+    # create net and load model
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device("cpu")
-    
+
+    model = MobileNet(pretrained=False, num_classes=config.NUM_CLASSES)
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
     model.to(device)
 
-    coco = COCO(anno_file)
-    img_ids = coco.getImgIds()
-    import random
-    random.shuffle(img_ids)
+    for index in range(len(test_dataset)):
+        image, target = test_dataset.pull_item(index)
 
-    for iid in img_ids:
-        img_anno = coco.loadImgs(iid)[0]
-        file_name = img_anno["file_name"] 
+        print('-' * 40)
+        # preprocessing
+        tran_image, _ = transform(image)
+        tran_image = tran_image.transpose(2, 0, 1)
+        tran_image = tran_image[np.newaxis, ...]
+        tran_image = torch.from_numpy(tran_image)
+        tran_image = tran_image.to(device)
 
-        ann_ids = coco.getAnnIds(imgIds=img_anno['id'], iscrowd=None)
-        coco_anns = coco.loadAnns(ann_ids)
+        # forward
+        dets, forward_time = process(tran_image, return_time=True)
+        print('forward time: {:.2f}ms'.format(forward_time * 1000))
+        src_height = tran_image.size(2)
+        src_width = tran_image.size(3)
 
-        if file_name.split('.')[-1] == 'jpg':
-            image_path = os.path.join(infer_images_dir, file_name)
-            image = cv2.imread(image_path)
-            images, meta = pre_process(image)
-            images = images.to(device)
-            output, dets, forward_time = process(images, return_time=True)
-            print("forward time: {:.2f}ms\n{}".format(forward_time * 1000, "-" * 40))
-            
-            dets = post_process(dets, meta)
-            ret = merge_outputs(dets)
+        dst_height, dst_width = image.shape[:2]
+        # post process
+        start = time.time()
+        dets = postprocess(dets, (src_width, src_height), (dst_width, dst_height))
+        dets = apply_nms(dets, hm_thresh, nms_thresh)
+        post_time = time.time() - start
+        print('post processing time: {:.2f}ms'.format(post_time * 1000))
 
-            dets = []
-            for i, c in ret.items():
-                mask = c[:, 4] > hm_thresh
-                if mask.any():
-                    c = c[mask]
-                    cls = np.full((c.shape[0], 1), i, dtype=c.dtype)
-                    c = np.concatenate((c, cls), axis=-1)
-                    dets.append(c)
-
-            if len(dets) == 1:
-                dets = dets[0]
-            elif len(dets) > 1:
-                dets = np.concatenate(dets)
-                
-            dets = py_cpu_nms(dets, nms_thresh)
-            
-            draw_image = draw(image, dets, is_coco=False)  # 画旋转矩形
-            #draw_image = draw(draw_image, coco_anns, is_coco=True)  # 画旋转矩形
-            if not os.path.isdir(output_dir):
-                os.makedirs(output_dir)
-            cv2.imwrite(os.path.join(output_dir, file_name), draw_image)
+        draw_image = draw(image, dets, is_gt=False)
+        #draw_image = draw(image, target, is_gt=True)
+        if not os.path.isdir(output_dir):
+            os.makedirs(output_dir)
+        cv2.imwrite(os.path.join(output_dir, '{}.jpg'.format(index)), draw_image)

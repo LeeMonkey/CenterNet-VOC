@@ -16,6 +16,7 @@ PRETRAINED_MODEL=None
 INPUT_SIZE = (640, 640)
 MEAN = (107, 114, 123)
 STD = (1, 1, 1)
+DOWNSAMPLE_RATIO=4
 
 date = time.strftime('%Y%m%d', time.localtime())
 # dir of model
