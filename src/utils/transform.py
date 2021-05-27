@@ -3,7 +3,8 @@
 import src.config as config
 from .augmentations import Compose, ConvertFromInts, \
     PhotometricDistort, Expand, RandomSampleCrop, \
-    RandomMirror, RandomRotate, Resize, Normalize
+    RandomMirror, RandomRotate, Resize, Normalize, \
+    RandomNoise, RandomBlur
 try:
     import xml.etree.cElementTree as ET
 except:
@@ -25,6 +26,8 @@ class CenterNetTransform(object):
             self.augment = Compose([
                 ConvertFromInts(),
                 PhotometricDistort(),
+                RandomBlur(),
+                RandomNoise(),
                 Expand(self.mean),
                 RandomSampleCrop(),
                 RandomMirror(),

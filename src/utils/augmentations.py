@@ -253,8 +253,10 @@ class RandomSampleCrop(object):
             for _ in range(50):
                 current_image = image
 
-                w = random.uniform(0.3 * width, width)
-                h = random.uniform(0.3 * height, height)
+                #min_ratio = 0.3
+                min_ratio = 0.8
+                w = random.uniform(min_ratio * width, width)
+                h = random.uniform(min_ratio * height, height)
 
                 # aspect ratio constraint b/t .5 & 2
                 if h / w < 0.5 or h / w > 2:
@@ -313,6 +315,64 @@ class RandomSampleCrop(object):
                 current_boxes[:, 2:-1] -= rect[:2]
 
                 return current_image, current_boxes
+
+
+class RandomNoise(object):
+    def __init__(self):
+        self.num_noises = (500, 1000, 1500)
+        self.Ops = ('add_salt_pepper_noise', 'add_gaussian_noise')
+
+    def __call__(self, image, target=None):
+        if random.randrange(2):
+            op = random.choice(self.Ops)
+            image = getattr(self, op)(image)
+        return image, target
+
+    def add_salt_pepper_noise(self, image):
+        num = random.choice(self.num_noises)
+        noise_image = image.copy()
+        height, width, _ = image.shape
+        rows = [random.randrange(height) for _ in range(num)]
+        cols = [random.randrange(width) for _ in range(num)]
+        for i in range(num):
+            noise_image[rows[i], cols[i]] = \
+                (255, 255, 255) if i % 2 else (0, 0, 0)
+        return noise_image
+
+    def add_gaussian_noise(self, image):
+        noise = np.zeros(image.shape, dtype=image.dtype)
+        mean = random.randint(5, 25)
+        std = random.randint(10, 50)
+        cv2.randn(noise, mean, std)
+        noise_image = cv2.add(image, noise)
+        return noise_image
+
+
+class RandomBlur(object):
+    def __init__(self):
+        self.ksizes = (3, 5, 7)
+        self.sigmas = (0.5, 1., 1.5)
+        self.Ops = ('gaussian_blur', 'mean_blur')
+
+    def __call__(self, image, target=None):
+        if random.randrange(2):
+            op = random.choice(self.Ops)
+            image = getattr(self, op)(image)
+        return image, target
+
+    def gaussian_blur(self, image):
+        ksize = random.choice(self.ksizes)
+        sigma = random.choice(self.sigmas)
+
+        image = cv2.GaussianBlur(image, (ksize, ksize), sigma)
+        return image
+
+    def mean_blur(self, image):
+        ksize = random.choice(self.ksizes)
+
+        image = cv2.blur(image, (ksize, ksize))
+        return image
+
 
 
 class Expand(object):
